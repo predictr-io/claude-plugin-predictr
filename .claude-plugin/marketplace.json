@@ -1,0 +1,14 @@
+{
+  "name": "predictr",
+  "owner": {
+    "name": "predictr.io",
+    "email": "support@predictr.io"
+  },
+  "plugins": [
+    {
+      "name": "predictr",
+      "source": "./plugins/predictr",
+      "description": "Drive predictr.io from the shell — connections, datasets, models, workflows, and the MBA / RFM / sales-forecast analysis slates — via predictr-cli."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "predictr",
+  "version": "0.1.0",
+  "description": "Drive predictr.io from the shell — connections, datasets, models, workflows, and the MBA / RFM / sales-forecast analysis slates — via predictr-cli.",
+  "author": {
+    "name": "predictr.io"
+  },
+  "repository": "https://github.com/predictr-io/claude-plugin-predictr",
+  "license": "MIT",
+  "keywords": ["predictr", "predictr.io", "predictr-cli", "data-analytics", "skill"]
+}
