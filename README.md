@@ -1,6 +1,6 @@
 # claude-plugin-predictr
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin for [predictr.io](https://predictr.io) — drive the platform from your shell via [`predictr-cli`](https://pypi.org/project/predictr-cli/).
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin for [predictr.io](https://predictr.io) — drive the platform from your shell via [`predictr-cli`](https://github.com/predictr-io/predictr-cli).
 
 ## Install
 
@@ -18,6 +18,8 @@ Installs a skill (`predictr`) that triggers whenever you mention predictr.io con
 You'll need `predictr-cli` installed and the following env vars exported in the shell session Claude Code is using:
 
 ```bash
+uv tool install git+https://github.com/predictr-io/predictr-cli
+
 export PREDICTR_API_URL="https://api.predictr.io"
 export PREDICTR_ORG="<your-org-name>"
 export PREDICTR_API_KEY="<your-api-key>"

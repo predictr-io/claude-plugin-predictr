@@ -10,6 +10,7 @@ predictr.io is a multi-tenant data-analytics SaaS. This skill is for **consuming
 ## When to use this skill
 
 Trigger on phrases like:
+
 - "list my connections / datasets / models / workflows"
 - "create an MBA / RFM / sales-forecast analysis"
 - "fit / train / predict on …"
@@ -30,7 +31,7 @@ echo "org=${PREDICTR_ORG:-<unset>} url=${PREDICTR_API_URL:-https://api.predictr.
 [ -n "$PREDICTR_API_KEY" ] || [ -n "$PREDICTR_BEARER_TOKEN" ] && echo "auth: ok" || echo "auth: MISSING"
 ```
 
-If `predictr-cli` is missing: `pip install predictr-cli` (or `pip install -e .` from a checkout of the `pebbles` repo). If a checkout is around, the binary is at `<pebbles>/.venv/bin/predictr-cli` — call it by full path or activate the venv; don't add it to PATH for the user.
+If `predictr-cli` is missing: `uv tool install git+https://github.com/predictr-io/predictr-cli`.
 
 If auth is missing, ask the user. **Never** print, log, or write a token to any file. If you must pass it for one command, use the env var inline (`PREDICTR_API_KEY=… predictr-cli …`) and don't echo it back.
 
@@ -102,6 +103,7 @@ cat conn.json | predictr-cli connections create -f -
 ```
 
 Discover the shape:
+
 - `predictr-cli meta schema-model` / `meta schema-dataset` — JSON Schema for the resource.
 - `predictr-cli meta transformations` — supported dataset transforms.
 - `predictr-cli <slate> guess-schema <conn-id>` (mba / rfm / salesforecast) — the server proposes a schema from the connection's data. Use this as a starting point and edit, don't hand-write.
@@ -208,6 +210,7 @@ Use these in scripts to branch on outcome.
 ## Diagnostics checklist
 
 When something fails, check in this order:
+
 1. `predictr-cli meta info` — server reachable?
 2. `predictr-cli capabilities` — auth working, plan healthy?
 3. Re-run with `-v` (verbose: prints request URL on stderr).
