@@ -42,40 +42,66 @@ Cheapest connectivity smoke test (no org needed): `predictr-cli meta info`.
 
 ## Detect: is this a first-time user?
 
-After the preflight succeeds, run a one-shot probe:
+After the preflight succeeds, probe the tenant. **A brand-new org is not empty of connections** — mr-slate's `org.created` webhook auto-provisions a default fileupload connection called "File Uploads" with no tables. So "no connections" is the wrong heuristic; "no tables anywhere" is the right one.
 
 ```bash
-predictr-cli connections list --output json | jq 'length'
+# Snapshot every connection's table count in one go.
+predictr-cli connections list --output json \
+  | jq -r '.[] | "\(.conn_id)\t\(.conn_name)\t\(.conn_type)"' \
+  > /tmp/predictr-conns.tsv
+
+while IFS=$'\t' read -r cid cname ctype; do
+  n=$(predictr-cli connections tables "$cid" --output json 2>/dev/null | jq 'length // 0')
+  echo "$cid  $cname  $ctype  tables=$n"
+done < /tmp/predictr-conns.tsv
 ```
 
-- **`0`** → treat as a first-time user. Walk them through the **First-time flow** (next section) unless they push back.
-- **`> 0`** but they're asking "how do I get started" / "what should I do next" — start the first-time flow from whichever step matches their existing state (skip connection setup if they already have one).
-- **`> 0`** and they have a specific operational request → skip the first-time flow, use the **Reference** sections lower down.
+Decision rules:
+
+- **No connections, or only the default "File Uploads" fileupload connection with 0 tables** → treat as a first-time user. Walk them through the **First-time flow** (next section).
+- The default "File Uploads" connection looks like: `conn_name == "File Uploads"`, `conn_type == "fileupload"`, `tables == []`. Recognise it and **use it** in Step 1 — don't create a second fileupload connection.
+- **Tables exist somewhere** but they're asking "how do I get started" / "what should I do next" — start the first-time flow from whichever step matches their existing state (skip connection setup, jump straight to dataset matching).
+- **Tables exist** and they have a specific operational request → skip the first-time flow, use the **Reference** sections lower down.
 
 ## First-time user flow
 
 This is the opinionated walk-through to take a brand-new predictr.io tenant from "empty" to "first prediction". Follow the order. Pause for the user to confirm at each step — don't barrel through.
 
-### Step 1 — Choose and set up a data connection
+### Step 1 — Pick the right connection
 
-Ask the user what their data lives in. Five connection types are supported:
+**Almost always: use the pre-provisioned "File Uploads" connection.**
+
+Every new org has a fileupload connection auto-created by mr-slate's `org.created` webhook. It's empty (no SQLite file in S3 yet, no tables) but the connection row exists. **Do not create a second fileupload connection.** Use the existing one — find its `conn_id` from `predictr-cli connections list` (look for `conn_name == "File Uploads"` and `conn_type == "fileupload"`).
+
+If the user has a CSV / TSV on disk, upload it to that connection:
+
+```bash
+# Pull the existing fileupload connection's id
+DEFAULT_CONN=$(predictr-cli connections list --output json \
+  | jq -r '.[] | select(.conn_type == "fileupload" and .conn_name == "File Uploads") | .conn_id' \
+  | head -1)
+
+predictr-cli connections upload "$DEFAULT_CONN" --file ./their-data.csv
+```
+
+The upload endpoint imports the CSV into the connection's SQLite blob in S3 **and** auto-crawls the new tables synchronously. There is no separate crawl step for fileupload — see Step 2.
+
+**Only create a different connection** if the user explicitly tells you their data lives in a cloud warehouse (Snowflake / BigQuery / Redshift / Athena). In that case:
 
 | Type | When to suggest it |
 |---|---|
-| **fileupload** | They have a CSV / TSV file sitting on disk. Fastest path to first value — no cloud setup needed. |
 | **snowflake** | Production data warehouse on Snowflake. |
 | **bigquery** | GCP, BigQuery datasets. |
 | **redshift** | AWS, Redshift cluster. |
 | **athena** | AWS, Athena over S3 / Glue catalog. |
 
-Discover the exact required fields for the chosen type:
+Discover the required fields:
 
 ```bash
-predictr-cli connections create --help          # general form
-predictr-cli meta schema-model | jq '.connection' # JSON Schema reference (if available)
+predictr-cli connections create --help
 ```
 
-For cloud sources, the user will need credentials, an endpoint / account / region, and (for warehouse types) a schema / dataset. Help them assemble these but **never** persist credentials to a file you create. Pass via inline JSON or by pointing them at a file *they* wrote.
+For cloud sources the user will need credentials, an endpoint / account / region, and (for warehouse types) a schema / dataset. Help them assemble these but **never** persist credentials to a file you created. Pass via inline JSON, or by pointing them at a file *they* wrote.
 
 Before saving, dry-test the config:
 
@@ -91,25 +117,22 @@ predictr-cli connections create -f conn.json
 predictr-cli connections create -d '<config-json>'
 ```
 
-For **fileupload**, the flow is simpler:
-
-```bash
-predictr-cli connections create -d '{"conn_name":"my-upload","conn_type":"fileupload"}'
-# capture the new conn_id from the response
-predictr-cli connections upload <conn-id> --file ./their-data.csv
-```
+When creating, **let the server assign `conn_id`** — never include a `conn_id` field in the create payload. If the create payload includes an existing `conn_id`, the API will reject with `Connection already exists` (line 148–149 of `blueprints/app_connections.py`).
 
 ### Step 2 — Scan metadata (crawl)
 
-The crawl discovers tables and columns server-side. Fileupload connections crawl implicitly on upload; cloud connections need it kicked off explicitly:
+How metadata gets discovered depends on the connection type:
 
-```bash
-predictr-cli connections crawl <conn-id>
-```
+- **fileupload / sqlite3** — crawled **automatically and synchronously** the moment a CSV is uploaded (the upload endpoint runs the crawler inline). **Never call `predictr-cli connections crawl <conn-id>` on a fileupload connection** — the API rejects it with `ValueError("Crawling is performed automatically for built-in databases")`.
+- **snowflake / bigquery / redshift / athena** — crawl is async and needs to be kicked off explicitly:
 
-Crawl is async on large schemas. For most setups it completes in seconds.
+  ```bash
+  predictr-cli connections crawl <conn-id>
+  ```
 
-Verify what was found:
+  For large schemas it can take seconds to minutes.
+
+Either way, once metadata exists, verify what was found:
 
 ```bash
 predictr-cli connections tables  <conn-id> --output table   # tables / views
@@ -415,13 +438,15 @@ If a request 401s, the token's expired or invalid — ask the user for a fresh o
 
 ## Safety rules
 
-- **Destructive commands** (`delete`, `unschedule`, overwriting via PUT): list & show the user what you're about to remove, then confirm. Never bulk-delete in a loop without explicit per-item confirmation or a clear blanket go-ahead.
+- **NEVER DELETE TO RECOVER FROM AN ERROR.** This is the single most important rule. When any command fails — duplicate ID, validation error, 500, timeout, anything — **stop**. Report the failure verbatim. Ask the user what to do. Do not call `delete`, `update`, or any "let me try again from scratch" action that destroys the state mid-debug. The state at the point of failure is the only thing that lets the user (or them and the platform team) work out what went wrong. Wiping it makes the bug uninvestigatable. If the user asks you to clean up after diagnosing, that's fine — but only on explicit ask.
+- **Destructive commands** (`delete`, `unschedule`, overwriting via PUT): list & show the user *exactly* what you're about to remove, name and id and resource type, then wait for confirmation. Never bulk-delete in a loop without explicit per-item confirmation or a clear blanket go-ahead. Never delete the default "File Uploads" connection that mr-slate auto-provisions — even if the user asks, push back because it's not easily recreatable without a fresh org.
 - **Credentials**: connection configs may include database passwords / service-account JSON / API tokens. **Never** write these to a file you created; if the user wants to template a config, have them put the secret in their own file (or pipe via stdin) and reference it. Never echo secrets back in chat. If a secret leaks into a tool output you produced, tell the user immediately and ask them to rotate it.
 - **Tokens**: never echo, log, write to disk, or include in commit messages or PR bodies.
 - **Cross-org**: if `--org-name` is passed explicitly, use it; otherwise rely on `PREDICTR_ORG`. Do not silently switch orgs.
-- **Retries**: the CLI already retries 5xx/429 with backoff. Don't wrap it in your own retry loop. For known-bad input (4xx), fix the input — don't re-fire.
+- **Retries**: the CLI already retries 5xx/429 with backoff. Don't wrap it in your own retry loop. For known-bad input (4xx), fix the input — don't re-fire. For *unknown* errors, surface them and stop; don't loop trying variations.
 - **Capacity**: before creating connections / datasets / models in bulk, check `predictr-cli capabilities` so you don't trip the plan limit mid-run.
 - **Pace yourself in the first-time flow**: don't auto-run the next step until the user has acknowledged the previous one. A user new to the platform needs to see *what just happened* before the next thing happens.
+- **conn_id is server-assigned**: never include a `conn_id` in a connection create payload. If you find yourself wanting to, you're trying to recreate something that already exists — stop and use the existing one.
 
 ## Exit codes
 
