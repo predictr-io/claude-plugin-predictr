@@ -1,6 +1,6 @@
 {
   "name": "predictr",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Drive predictr.io from the shell — connections, datasets, models, workflows, and the MBA / RFM / sales-forecast analysis slates — via predictr-cli.",
   "author": {
     "name": "predictr.io"

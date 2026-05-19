@@ -17,6 +17,7 @@ Trigger on phrases like:
 - "upload this CSV to predictr"
 - "run / schedule a workflow"
 - "what's my predictr plan / capabilities"
+- "I'm new to predictr — help me get started"
 - raw mentions of `predictr-cli`, `predictr.io`, `PREDICTR_API_KEY`
 
 Do **not** trigger when the user is editing the predictr.io source code (mr-slate, dino, wilma, bamm-bamm, bedrock) — that's platform development, not platform usage.
@@ -39,7 +40,238 @@ If `PREDICTR_ORG` is unset, ask which org to use (or pass `--org-name` per call)
 
 Cheapest connectivity smoke test (no org needed): `predictr-cli meta info`.
 
-## The mental model
+## Detect: is this a first-time user?
+
+After the preflight succeeds, run a one-shot probe:
+
+```bash
+predictr-cli connections list --output json | jq 'length'
+```
+
+- **`0`** → treat as a first-time user. Walk them through the **First-time flow** (next section) unless they push back.
+- **`> 0`** but they're asking "how do I get started" / "what should I do next" — start the first-time flow from whichever step matches their existing state (skip connection setup if they already have one).
+- **`> 0`** and they have a specific operational request → skip the first-time flow, use the **Reference** sections lower down.
+
+## First-time user flow
+
+This is the opinionated walk-through to take a brand-new predictr.io tenant from "empty" to "first prediction". Follow the order. Pause for the user to confirm at each step — don't barrel through.
+
+### Step 1 — Choose and set up a data connection
+
+Ask the user what their data lives in. Five connection types are supported:
+
+| Type | When to suggest it |
+|---|---|
+| **fileupload** | They have a CSV / TSV file sitting on disk. Fastest path to first value — no cloud setup needed. |
+| **snowflake** | Production data warehouse on Snowflake. |
+| **bigquery** | GCP, BigQuery datasets. |
+| **redshift** | AWS, Redshift cluster. |
+| **athena** | AWS, Athena over S3 / Glue catalog. |
+
+Discover the exact required fields for the chosen type:
+
+```bash
+predictr-cli connections create --help          # general form
+predictr-cli meta schema-model | jq '.connection' # JSON Schema reference (if available)
+```
+
+For cloud sources, the user will need credentials, an endpoint / account / region, and (for warehouse types) a schema / dataset. Help them assemble these but **never** persist credentials to a file you create. Pass via inline JSON or by pointing them at a file *they* wrote.
+
+Before saving, dry-test the config:
+
+```bash
+predictr-cli connections test-config -d '<config-json>'
+```
+
+If that succeeds, create the connection:
+
+```bash
+predictr-cli connections create -f conn.json
+# or
+predictr-cli connections create -d '<config-json>'
+```
+
+For **fileupload**, the flow is simpler:
+
+```bash
+predictr-cli connections create -d '{"conn_name":"my-upload","conn_type":"fileupload"}'
+# capture the new conn_id from the response
+predictr-cli connections upload <conn-id> --file ./their-data.csv
+```
+
+### Step 2 — Scan metadata (crawl)
+
+The crawl discovers tables and columns server-side. Fileupload connections crawl implicitly on upload; cloud connections need it kicked off explicitly:
+
+```bash
+predictr-cli connections crawl <conn-id>
+```
+
+Crawl is async on large schemas. For most setups it completes in seconds.
+
+Verify what was found:
+
+```bash
+predictr-cli connections tables  <conn-id> --output table   # tables / views
+predictr-cli connections columns <conn-id> <table-name>     # column types
+```
+
+Surface the table list to the user. Often they have **dozens** of tables and only one or two are relevant — let them point at the candidate(s) rather than guessing.
+
+### Step 3 — Peek at the data
+
+For any candidate table, fetch a sample to see actual values:
+
+```bash
+predictr-cli connections table-sample <conn-id> <table-name> --rows 10
+```
+
+Or, once a dataset exists:
+
+```bash
+predictr-cli datasets sample <dataset-id> --rows 10
+```
+
+Read the sample. You want to answer:
+
+- What grain is each row at? (one customer, one order line, one timestamped event, one daily aggregate?)
+- What columns are identifiers (high-cardinality strings/ints)?
+- What columns are timestamps?
+- What columns are numeric measures (price, revenue, quantity)?
+- What columns are categorical (status, category, region)?
+
+This is the input to the next step.
+
+### Step 4 — Match the data to an analysis type
+
+Three analysis slates are available. Each needs a specific data shape. Use the sample + column types to choose.
+
+#### Market Basket Analysis (`mba`) — "what sells together"
+
+**Needs**: a **container / detail** structure — long-format rows where each row is one item within a transaction.
+
+| Required column | What it looks like |
+|---|---|
+| Basket / container id | `order_id`, `invoice_id`, `basket_id`, `transaction_id` — repeats across multiple rows |
+| Item identifier | `sku`, `product_code`, `item_id`, `product_name` — what was in the basket |
+
+**Optional**: quantity, unit price, line total, timestamp.
+
+**Pattern-match heuristics** when scanning a column list:
+- Two columns whose names include `order` / `invoice` / `basket` and `item` / `sku` / `product` — strong MBA candidate
+- Tables named `order_lines`, `invoice_lines`, `basket_items`, `transaction_items`, `pos_lines`, `line_items` — almost certainly MBA-shaped
+
+**Anti-pattern**: a one-row-per-order table where items are in JSON / comma-separated columns. Not suitable without flattening first.
+
+#### Customer Clustering (`rfm`) — "who are my customers, really"
+
+**Needs**: per-customer transaction history. Each row is one transaction (or one customer-day aggregate) with three signals: who, when, and how much.
+
+| Required column | What it looks like |
+|---|---|
+| Customer id | `customer_id`, `user_id`, `account_id`, `loyalty_card`, `email_hash` |
+| Transaction timestamp | `transaction_date`, `order_date`, `created_at` |
+| Monetary amount | `amount`, `total`, `revenue`, `order_value`, `line_total` |
+
+**Pattern-match heuristics**:
+- Any table with `customer_*` + a date column + a numeric value column
+- The MBA-shaped tables above will *also* work for RFM if they carry the customer id
+
+**Anti-pattern**: anonymous/guest-checkout-heavy tables with no usable customer id will cluster mostly into "anonymous".
+
+#### Sales Forecasting (`salesforecast`) — "what will sales look like next"
+
+**Needs**: a time series of numeric values. Each row is one observation at one point in time, optionally with grouping dimensions.
+
+| Required column | What it looks like |
+|---|---|
+| Timestamp | `date`, `day`, `week`, `month`, `transaction_date` |
+| Numeric value to forecast | `revenue`, `units`, `sales`, `volume`, `quantity` |
+
+**Optional**: dimensions to forecast per-group (per-store, per-region, per-product).
+
+**Pattern-match heuristics**:
+- Aggregated tables with one numeric column + one date column — directly suitable
+- Granular transaction tables (like the MBA / RFM ones above) — *also* work, will be auto-aggregated by date
+
+**Anti-pattern**: very sparse / very short series (< ~12 timepoints) — forecast quality will be poor regardless of model. Tell the user.
+
+#### When multiple slates fit
+
+A typical transactional table (`order_lines` with customer + order + product + amount + date) fits **all three**. Suggest the one most aligned with their stated business question:
+
+| User says they want to know… | Slate |
+|---|---|
+| "what sells with what" / cross-sell / bundle recommendations | mba |
+| "who my customers are" / segments / retention / lifetime value | rfm |
+| "how much I'll sell" / demand / capacity / cash forecast | salesforecast |
+
+If they don't have a stated question, **ask**. Don't pick for them.
+
+### Step 5 — Let the server guess a schema
+
+Once a table is identified, ask predictr to propose a config:
+
+```bash
+predictr-cli mba           guess-schema <conn-id> > mba.json
+predictr-cli rfm           guess-schema <conn-id> > rfm.json
+predictr-cli salesforecast guess-schema <conn-id> > sf.json
+```
+
+The server inspects columns + samples and proposes a complete analysis config. **This is the recommended starting point** — the heuristics it uses are richer than column-name matching.
+
+Show the proposed JSON to the user and let them tweak field mappings before creating.
+
+### Step 6 — Create, fit, predict
+
+Once the config is right:
+
+```bash
+predictr-cli <slate> create -f <config>.json    # returns an analysis id
+predictr-cli <slate> fit <analysis-id>          # async — submits a Batch job
+```
+
+Poll status until done:
+
+```bash
+predictr-cli <slate> get <analysis-id> | jq '.runs[-1]'
+```
+
+When the latest run is `complete`, promote the model:
+
+```bash
+predictr-cli <slate> set-active-model <analysis-id> --model-id <fit-model-id>
+```
+
+Then predict:
+
+```bash
+predictr-cli <slate> predict <analysis-id> ...
+# — exact args differ per slate; check `predict --help`
+```
+
+For MBA specifically, after fit there are also `rules` and `items` commands worth showing the user — they're often what people actually want to see.
+
+```bash
+predictr-cli mba rules <analysis-id> --output table | head
+predictr-cli mba items <analysis-id> --output table | head
+```
+
+### What "done" looks like for the first-time flow
+
+A clean first-time onboarding ends with the user having:
+
+1. ✅ A working connection
+2. ✅ A crawled schema with at least one candidate table
+3. ✅ A created analysis (mba / rfm / salesforecast) with a sensible config
+4. ✅ A successful fit
+5. ✅ Their first prediction or rules output
+
+Don't declare "done" until they've seen useful output from step 5. The whole point is the answer, not the pipeline.
+
+---
+
+## The mental model (reference)
 
 ```
 connection ──▶ dataset ──▶ model | analysis (mba / rfm / salesforecast)
@@ -55,6 +287,7 @@ workflow = scheduled / orchestrated runs of the above
   - **mba** — market-basket / association rules
   - **rfm** — recency-frequency-monetary clustering
   - **salesforecast** — time-series sales forecasting
+
   Each has `create → fit → set-active-model → predict`. Each fit produces a model artefact; `set-active-model` is what `predict` resolves against.
 - **Workflow** — orchestrated run definition; can be scheduled (`workflows schedule …`) or fired ad-hoc (`workflows run …`).
 
@@ -77,7 +310,7 @@ predictr-cli salesforecast list|get|create|update|delete|fit|set-active-model|pr
 
 `<noun> --help` and `<noun> <verb> --help` are authoritative. Run them when in doubt.
 
-## Standard workflow
+## Standard workflows (for experienced users)
 
 Most user requests reduce to one of these flows. Pick the closest, then improvise.
 
@@ -107,14 +340,6 @@ Discover the shape:
 - `predictr-cli meta schema-model` / `meta schema-dataset` — JSON Schema for the resource.
 - `predictr-cli meta transformations` — supported dataset transforms.
 - `predictr-cli <slate> guess-schema <conn-id>` (mba / rfm / salesforecast) — the server proposes a schema from the connection's data. Use this as a starting point and edit, don't hand-write.
-
-When asking the server to guess, then create:
-
-```bash
-predictr-cli mba guess-schema <conn-id> > mba.json
-$EDITOR mba.json   # or programmatically tweak with jq
-predictr-cli mba create -f mba.json
-```
 
 ### Upload a CSV (fileupload connection)
 
@@ -191,10 +416,12 @@ If a request 401s, the token's expired or invalid — ask the user for a fresh o
 ## Safety rules
 
 - **Destructive commands** (`delete`, `unschedule`, overwriting via PUT): list & show the user what you're about to remove, then confirm. Never bulk-delete in a loop without explicit per-item confirmation or a clear blanket go-ahead.
-- **Tokens**: never echo, log, write to disk, or include in commit messages or PR bodies. If a token leaks into a tool output you produced, tell the user immediately and ask them to rotate it.
+- **Credentials**: connection configs may include database passwords / service-account JSON / API tokens. **Never** write these to a file you created; if the user wants to template a config, have them put the secret in their own file (or pipe via stdin) and reference it. Never echo secrets back in chat. If a secret leaks into a tool output you produced, tell the user immediately and ask them to rotate it.
+- **Tokens**: never echo, log, write to disk, or include in commit messages or PR bodies.
 - **Cross-org**: if `--org-name` is passed explicitly, use it; otherwise rely on `PREDICTR_ORG`. Do not silently switch orgs.
 - **Retries**: the CLI already retries 5xx/429 with backoff. Don't wrap it in your own retry loop. For known-bad input (4xx), fix the input — don't re-fire.
 - **Capacity**: before creating connections / datasets / models in bulk, check `predictr-cli capabilities` so you don't trip the plan limit mid-run.
+- **Pace yourself in the first-time flow**: don't auto-run the next step until the user has acknowledged the previous one. A user new to the platform needs to see *what just happened* before the next thing happens.
 
 ## Exit codes
 
