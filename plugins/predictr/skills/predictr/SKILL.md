@@ -1,6 +1,6 @@
 ---
 name: predictr
-description: Drive the predictr.io data-analytics platform from the shell — connections, datasets, models, workflows, and the MBA / RFM / sales-forecast analysis slates — using the predictr-cli (or raw REST). Trigger whenever the user mentions predictr.io, predictr-cli, or asks to list/create/fit/predict against connections, datasets, models, workflows, market-basket analysis, RFM clustering, or sales forecasting on a predictr.io tenant. Also trigger when the user wants to upload a CSV to a fileupload connection, schedule a workflow, or call a predictr.io endpoint by hand.
+description: Drive the predictr.io data-analytics platform from the shell — connections, datasets, models, workflows, and the MBA / RFM / forecast analysis slates — using the predictr-cli (or raw REST). Trigger whenever the user mentions predictr.io, predictr-cli, or asks to list/create/fit/predict against connections, datasets, models, workflows, market-basket analysis, RFM clustering, or sales forecasting on a predictr.io tenant. Also trigger when the user wants to upload a CSV to a fileupload connection, schedule a workflow, or call a predictr.io endpoint by hand.
 ---
 
 # predictr.io
@@ -12,7 +12,7 @@ predictr.io is a multi-tenant data-analytics SaaS. This skill is for **consuming
 Trigger on phrases like:
 
 - "list my connections / datasets / models / workflows"
-- "create an MBA / RFM / sales-forecast analysis"
+- "create an MBA / RFM / forecast analysis"
 - "fit / train / predict on …"
 - "upload this CSV to predictr"
 - "run / schedule a workflow"
@@ -202,7 +202,7 @@ Three analysis slates are available. Each needs a specific data shape. Use the s
 
 **Anti-pattern**: anonymous/guest-checkout-heavy tables with no usable customer id will cluster mostly into "anonymous".
 
-#### Sales Forecasting (`salesforecast`) — "what will sales look like next"
+#### Forecasting (`forecast`) — "what will sales look like next"
 
 **Needs**: a time series of numeric values. Each row is one observation at one point in time, optionally with grouping dimensions.
 
@@ -227,7 +227,7 @@ A typical transactional table (`order_lines` with customer + order + product + a
 |---|---|
 | "what sells with what" / cross-sell / bundle recommendations | mba |
 | "who my customers are" / segments / retention / lifetime value | rfm |
-| "how much I'll sell" / demand / capacity / cash forecast | salesforecast |
+| "how much I'll sell" / demand / capacity / cash forecast | forecast |
 
 If they don't have a stated question, **ask**. Don't pick for them.
 
@@ -238,7 +238,7 @@ Once a table is identified, ask predictr to propose a config:
 ```bash
 predictr-cli mba           guess-schema <conn-id> > mba.json
 predictr-cli rfm           guess-schema <conn-id> > rfm.json
-predictr-cli salesforecast guess-schema <conn-id> > sf.json
+predictr-cli forecast guess-schema <conn-id> > sf.json
 ```
 
 The server inspects columns + samples and proposes a complete analysis config. **This is the recommended starting point** — the heuristics it uses are richer than column-name matching.
@@ -286,7 +286,7 @@ A clean first-time onboarding ends with the user having:
 
 1. ✅ A working connection
 2. ✅ A crawled schema with at least one candidate table
-3. ✅ A created analysis (mba / rfm / salesforecast) with a sensible config
+3. ✅ A created analysis (mba / rfm / forecast) with a sensible config
 4. ✅ A successful fit
 5. ✅ Their first prediction or rules output
 
@@ -297,7 +297,7 @@ Don't declare "done" until they've seen useful output from step 5. The whole poi
 ## The mental model (reference)
 
 ```
-connection ──▶ dataset ──▶ model | analysis (mba / rfm / salesforecast)
+connection ──▶ dataset ──▶ model | analysis (mba / rfm / forecast)
                                          │
                                          └─▶ predict
 workflow = scheduled / orchestrated runs of the above
@@ -309,7 +309,7 @@ workflow = scheduled / orchestrated runs of the above
 - **Analysis slates** — opinionated pipelines for one algorithm family:
   - **mba** — market-basket / association rules
   - **rfm** — recency-frequency-monetary clustering
-  - **salesforecast** — time-series sales forecasting
+  - **forecast** — time-series forecasting
 
   Each has `create → fit → set-active-model → predict`. Each fit produces a model artefact; `set-active-model` is what `predict` resolves against.
 - **Workflow** — orchestrated run definition; can be scheduled (`workflows schedule …`) or fired ad-hoc (`workflows run …`).
@@ -328,7 +328,7 @@ predictr-cli workflows     list|get|create|update|delete|run|history|schedule|un
 
 predictr-cli mba           list|get|create|update|delete|fit|set-active-model|rules|items|predict|guess-schema
 predictr-cli rfm           list|get|create|update|delete|fit|set-active-model|predict|guess-schema
-predictr-cli salesforecast list|get|create|update|delete|fit|set-active-model|predict|guess-schema|holidays
+predictr-cli forecast list|get|create|update|delete|fit|set-active-model|predict|guess-schema|holidays
 ```
 
 `<noun> --help` and `<noun> <verb> --help` are authoritative. Run them when in doubt.
@@ -362,7 +362,7 @@ Discover the shape:
 
 - `predictr-cli meta schema-model` / `meta schema-dataset` — JSON Schema for the resource.
 - `predictr-cli meta transformations` — supported dataset transforms.
-- `predictr-cli <slate> guess-schema <conn-id>` (mba / rfm / salesforecast) — the server proposes a schema from the connection's data. Use this as a starting point and edit, don't hand-write.
+- `predictr-cli <slate> guess-schema <conn-id>` (mba / rfm / forecast) — the server proposes a schema from the connection's data. Use this as a starting point and edit, don't hand-write.
 
 ### Upload a CSV (fileupload connection)
 

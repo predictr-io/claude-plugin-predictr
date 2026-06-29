@@ -13,7 +13,7 @@ In Claude Code:
 
 ## What it does
 
-Installs a skill (`predictr`) that triggers whenever you mention predictr.io concepts — connections, datasets, models, workflows, and the MBA / RFM / sales-forecast analysis slates. Claude then drives `predictr-cli` (or raw REST) on your behalf.
+Installs a skill (`predictr`) that triggers whenever you mention predictr.io concepts — connections, datasets, models, workflows, and the MBA / RFM / forecast analysis slates. Claude then drives `predictr-cli` (or raw REST) on your behalf.
 
 You'll need `predictr-cli` installed and the following env vars exported in the shell session Claude Code is using:
 
