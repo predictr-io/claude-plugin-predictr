@@ -81,10 +81,11 @@ DEFAULT_CONN=$(predictr-cli connections list --output json \
   | jq -r '.[] | select(.conn_type == "fileupload" and .conn_name == "File Uploads") | .conn_id' \
   | head -1)
 
-predictr-cli connections upload "$DEFAULT_CONN" --file ./their-data.csv
+# --table-name is REQUIRED — it's the destination table name on the connection.
+predictr-cli connections upload "$DEFAULT_CONN" --file ./their-data.csv --table-name their_data
 ```
 
-The upload endpoint imports the CSV into the connection's SQLite blob in S3 **and** auto-crawls the new tables synchronously. There is no separate crawl step for fileupload — see Step 2.
+The upload endpoint imports the CSV into the connection's SQLite blob in S3 **and** auto-crawls the new tables synchronously. There is no separate crawl step for fileupload — see Step 2. (Large files can be sent in chunks via `--part-number` / `--total-parts`; the short flag for `--file` is `-F`.)
 
 **Only create a different connection** if the user explicitly tells you their data lives in a cloud warehouse (Snowflake / BigQuery / Redshift / Athena). In that case:
 
@@ -135,8 +136,8 @@ How metadata gets discovered depends on the connection type:
 Either way, once metadata exists, verify what was found:
 
 ```bash
-predictr-cli connections tables  <conn-id> --output table   # tables / views
-predictr-cli connections columns <conn-id> <table-name>     # column types
+predictr-cli connections tables  <conn-id> --output table                          # tables / views
+predictr-cli connections columns <conn-id> --table <table-name> --schema <schema>  # column types (--table/-t and --schema/-s both required)
 ```
 
 Surface the table list to the user. Often they have **dozens** of tables and only one or two are relevant — let them point at the candidate(s) rather than guessing.
@@ -146,13 +147,15 @@ Surface the table list to the user. Often they have **dozens** of tables and onl
 For any candidate table, fetch a sample to see actual values:
 
 ```bash
-predictr-cli connections table-sample <conn-id> <table-name> --rows 10
+predictr-cli connections table-sample <conn-id> <table-name> --schema <schema>
 ```
+
+`--schema`/`-s` is required (e.g. `--schema main` for sqlite3/fileupload). The command returns a fixed-size key-value sample; there is no row-count flag.
 
 Or, once a dataset exists:
 
 ```bash
-predictr-cli datasets sample <dataset-id> --rows 10
+predictr-cli datasets sample <dataset-id>            # add --feature <col> to sample a single column
 ```
 
 Read the sample. You want to answer:
@@ -233,15 +236,19 @@ If they don't have a stated question, **ask**. Don't pick for them.
 
 ### Step 5 — Let the server guess a schema
 
-Once a table is identified, ask predictr to propose a config:
+Once a table is identified, ask predictr to propose a config. **Both `--schema-name` and `--table-name` are required** — the API 422s ("Both schema_name and table_name query parameters are required") if either is missing:
 
 ```bash
-predictr-cli mba           guess-schema <conn-id> > mba.json
-predictr-cli rfm           guess-schema <conn-id> > rfm.json
-predictr-cli forecast guess-schema <conn-id> > sf.json
+predictr-cli mba      guess-schema <conn-id> --schema-name main --table-name <table> > mba.json
+predictr-cli rfm      guess-schema <conn-id> --schema-name main --table-name <table> > rfm.json
+predictr-cli forecast guess-schema <conn-id> --schema-name main --table-name <table> > sf.json
 ```
 
+(For fileupload / sqlite3 the schema is `main`.)
+
 The server inspects columns + samples and proposes a complete analysis config. **This is the recommended starting point** — the heuristics it uses are richer than column-name matching.
+
+**guess-schema needs a reachable LLM backend (AWS Bedrock `Converse`).** Against a local dev API without Bedrock it 500s (`ClientError … 405 … Converse operation`). When it's unavailable, hand-author the config instead — the required fields per slate are listed in Step 6.
 
 Show the proposed JSON to the user and let them tweak field mappings before creating.
 
@@ -254,13 +261,23 @@ predictr-cli <slate> create -f <config>.json    # returns an analysis id
 predictr-cli <slate> fit <analysis-id>          # async — submits a Batch job
 ```
 
-Poll status until done:
+Minimum required create fields per slate (beyond `name` / `connection_id` / `schema_name` / `table_name`) — useful when hand-authoring because guess-schema is unavailable:
+
+| Slate | Required field(s) |
+|---|---|
+| mba | `basket_identifier_column`, `item_identifier_column` |
+| forecast | `date_column`, `value_column` |
+| rfm | customer / date / monetary columns (see `guess-schema` output or probe with a minimal payload) |
+
+If you're unsure of the field names, send a minimal payload once and read the 422 — the Pydantic validation error names every missing required field. That's a cheap, non-destructive way to discover the shape; don't loop firing variations.
+
+Poll status until done — analyses expose a top-level `status` and `build_history`, **not** a `runs` array:
 
 ```bash
-predictr-cli <slate> get <analysis-id> | jq '.runs[-1]'
+predictr-cli <slate> get <analysis-id> | jq '{status, model_error, build_history}'
 ```
 
-When the latest run is `complete`, promote the model:
+When `status` is `fitted` (and `model_error` is empty), promote the model:
 
 ```bash
 predictr-cli <slate> set-active-model <analysis-id> --model-id <fit-model-id>
@@ -270,14 +287,18 @@ Then predict:
 
 ```bash
 predictr-cli <slate> predict <analysis-id> ...
-# — exact args differ per slate; check `predict --help`
+# — exact args differ per slate; check `predict --help`. Known flags:
+#   rfm predict      -R/--recency  -F/--frequency  -M/--monetary  [--ml-model-id]
+#   forecast predict -p/--periods (14)  --include-history/--no-include-history  --max-history-days (365)  [--ml-model-id]
+#   mba predict      --ml-model-id   (query-param driven; defaults to the active model)
 ```
 
-For MBA specifically, after fit there are also `rules` and `items` commands worth showing the user — they're often what people actually want to see.
+For MBA specifically, after fit there are also `rules` and `items` commands worth showing the user — they're often what people actually want to see. **Neither takes `--output`** — they emit JSON; pipe to `jq`. `rules` supports `--sort-field` / `--sort-order` / `--filter` / `--page` / `--page-size` / `--ml-model-id`; `items` only takes `--ml-model-id`.
 
 ```bash
-predictr-cli mba rules <analysis-id> --output table | head
-predictr-cli mba items <analysis-id> --output table | head
+predictr-cli mba rules <analysis-id> --sort-field lift --sort-order desc \
+  | jq -r '.[] | "\((.given_items|join("+"))) => \((.suggested_items|join("+")))\tconf=\(.confidence)\tlift=\(.lift)"' | head
+predictr-cli mba items <analysis-id> | jq . | head
 ```
 
 ### What "done" looks like for the first-time flow
@@ -369,8 +390,8 @@ Discover the shape:
 ```bash
 predictr-cli connections create -d '{"conn_name":"my-upload","conn_type":"fileupload"}'
 # → grab the conn_id from the response
-predictr-cli connections upload <conn-id> --file ./data.csv
-predictr-cli connections crawl <conn-id>           # refresh discovered schema
+predictr-cli connections upload <conn-id> --file ./data.csv --table-name my_data  # --table-name is required
+# No crawl step for fileupload — upload auto-crawls synchronously (crawl would be rejected).
 predictr-cli connections tables <conn-id>
 ```
 
